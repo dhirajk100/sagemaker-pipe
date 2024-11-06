@@ -1,0 +1,71 @@
+import sagemaker
+from sagemaker.workflow.steps import ProcessingStep, TrainingStep
+from sagemaker.workflow.pipeline import Pipeline
+from sagemaker.processing import ScriptProcessor
+from sagemaker.estimator import Estimator
+from sagemaker.workflow.parameters import ParameterString, ParameterInteger
+
+# Initialize SageMaker session and role
+sagemaker_session = sagemaker.Session()
+role = sagemaker.get_execution_role()
+
+# Define input parameters
+input_data = ParameterString(name="InputData", default_value="s3://my-bucket/data/")
+instance_type = ParameterString(name="InstanceType", default_value="ml.m5.xlarge")
+training_epochs = ParameterInteger(name="Epochs", default_value=10)
+
+# Step 1: Data Preprocessing
+processor = ScriptProcessor(
+    image_uri="763104351884.dkr.ecr.us-west-2.amazonaws.com/sklearn-processing:latest",
+    role=role,
+    instance_type="ml.m5.xlarge",
+    instance_count=1
+)
+
+step_preprocess = ProcessingStep(
+    name="PreprocessData",
+    processor=processor,
+    inputs=[sagemaker.inputs.ProcessingInput(source=input_data, destination="/opt/ml/processing/input")],
+    outputs=[sagemaker.outputs.ProcessingOutput(source="/opt/ml/processing/output", destination="s3://my-bucket/output/")]
+)
+
+# Step 2: Model Training
+estimator = Estimator(
+    role=role,
+    instance_count=1,
+    instance_type="ml.m5.xlarge",
+    image_uri="763104351884.dkr.ecr.us-west-2.amazonaws.com/tensorflow-training:2.3.0-cpu-py37-ubuntu18.04",
+    hyperparameters={"epochs": training_epochs}
+)
+
+step_train = TrainingStep(
+    name="TrainModel",
+    estimator=estimator,
+    inputs={"train": step_preprocess.properties.ProcessingOutputConfig.Outputs["output"].S3Output.S3Uri}
+)
+
+# Step 3: Model Evaluation
+script_processor = ScriptProcessor(
+    image_uri="763104351884.dkr.ecr.us-west-2.amazonaws.com/sklearn-processing:latest",
+    role=role,
+    instance_type="ml.m5.xlarge",
+    instance_count=1
+)
+
+step_evaluate = ProcessingStep(
+    name="EvaluateModel",
+    processor=script_processor,
+    inputs=[sagemaker.inputs.ProcessingInput(source=step_train.properties.ModelArtifacts.S3ModelArtifacts, destination="/opt/ml/processing/model")]
+)
+
+# Create the pipeline
+pipeline = Pipeline(
+    name="MySageMakerPipeline",
+    parameters=[input_data, instance_type, training_epochs],
+    steps=[step_preprocess, step_train, step_evaluate]
+)
+
+# Execute the pipeline
+pipeline.upsert(role_arn=role)
+execution = pipeline.start()
+execution.wait()
